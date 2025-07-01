@@ -8,7 +8,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.2.2.0" # 職種別平準化対応版
+APP_VERSION = "proto.2.2.1" # UIバグ修正版
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- ヘルパー関数: サマリー作成 ---
@@ -73,7 +73,6 @@ def _create_schedule_df(shifts_values, staff, days, staff_df, requests_map):
     schedule_df.insert(1, '職員名', schedule_df['職員番号'].map(staff_map['職員名']))
     schedule_df.insert(2, '職種', schedule_df['職員番号'].map(staff_map['職種']))
     return schedule_df
-
 
 def _calculate_penalty_breakdown(shifts_values, params):
     breakdown = {}
@@ -146,27 +145,26 @@ def _calculate_penalty_breakdown(shifts_values, params):
     
     return breakdown
 
-
 # --- メインのソルバー関数 ---
 def solve_shift_model(params):
     year, month = params['year'], params['month']
     num_days = calendar.monthrange(year, month)[1]; days = list(range(1, num_days + 1)); staff = params['staff_df']['職員番号'].tolist()
     staff_info = params['staff_df'].set_index('職員番号').to_dict('index')
-    params['staff_info'] = staff_info # penalty_breakdown用
-    params['staff'] = staff # penalty_breakdown用
+    params['staff_info'] = staff_info 
+    params['staff'] = staff 
     sundays = [d for d in days if calendar.weekday(year, month, d) == 6]; weekdays = [d for d in days if d not in sundays]
-    params['sundays'] = sundays; params['weekdays'] = weekdays; params['days'] = days # penalty_breakdown用
+    params['sundays'] = sundays; params['weekdays'] = weekdays; params['days'] = days 
     
     managers = [s for s in staff if pd.notna(staff_info[s]['役職'])]; pt_staff = [s for s in staff if staff_info[s]['職種'] == '理学療法士']
     ot_staff = [s for s in staff if staff_info[s]['職種'] == '作業療法士']; st_staff = [s for s in staff if staff_info[s]['職種'] == '言語聴覚士']
-    params['pt_staff'] = pt_staff; params['ot_staff'] = ot_staff; params['st_staff'] = st_staff # penalty_breakdown用
+    params['pt_staff'] = pt_staff; params['ot_staff'] = ot_staff; params['st_staff'] = st_staff 
     
     kaifukuki_staff = [s for s in staff if staff_info[s].get('役割1') == '回復期専従']; kaifukuki_pt = [s for s in kaifukuki_staff if staff_info[s]['職種'] == '理学療法士']
     kaifukuki_ot = [s for s in kaifukuki_staff if staff_info[s]['職種'] == '作業療法士']; gairai_staff = [s for s in staff if staff_info[s].get('役割1') == '外来PT']
     chiiki_staff = [s for s in staff if staff_info[s].get('役割1') == '地域包括専従']; sunday_off_staff = gairai_staff + chiiki_staff
-    params['kaifukuki_pt'] = kaifukuki_pt; params['kaifukuki_ot'] = kaifukuki_ot; params['gairai_staff'] = gairai_staff # penalty_breakdown用
+    params['kaifukuki_pt'] = kaifukuki_pt; params['kaifukuki_ot'] = kaifukuki_ot; params['gairai_staff'] = gairai_staff 
     job_types = {'PT': pt_staff, 'OT': ot_staff, 'ST': st_staff}
-    params['job_types'] = job_types # penalty_breakdown用
+    params['job_types'] = job_types 
     
     requests_map = {s: {} for s in staff}
     request_types = ['×', '△', '○', '有', '特', '夏', 'AM有', 'PM有', 'AM休', 'PM休']
@@ -213,6 +211,7 @@ def solve_shift_model(params):
             for d in sundays: model.Add(shifts[(s, d)] == 0)
     if params['h5_on']:
         for s in staff: model.Add(sum(shifts[(s, d)] for d in sundays) <= 2)
+    
     penalties = []
     
     if params['s4_on']:
@@ -226,7 +225,7 @@ def solve_shift_model(params):
         for d in days:
             current_week.append(d)
             if calendar.weekday(year, month, d) == 5 or d == num_days: weeks_in_month.append(current_week); current_week = []
-        params['weeks_in_month'] = weeks_in_month # penalty_breakdown用
+        params['weeks_in_month'] = weeks_in_month
         
         for s_idx, s in enumerate(staff):
             s_reqs = requests_map.get(s, {})
@@ -314,22 +313,23 @@ def solve_shift_model(params):
                     is_half = d in all_half_day_requests.get(s, set())
                     unit = int(staff_info[s]['1日の単位数'])
                     term = model.NewIntVar(0, unit, f'p_u_s{s}_d{d}')
-                    model.Add(term == shifts[(s, d)] * unit * (0.5 if is_half else 1.0))
+                    # 半休は0.5倍にするが、shifts[(s,d)]が0(休み)の場合は0になるように乗算する
+                    model.AddMultiplicationEquality(term, [shifts[(s,d)]], int(unit * (0.5 if is_half else 1.0)))
                     provided_units_expr_list.append(term)
                 
                 provided_units_expr = sum(provided_units_expr_list)
                 
                 event_unit_for_day = event_units[job.lower()].get(d, 0) + (event_units['all'].get(d, 0) * ratio)
                 
-                residual_units = model.NewIntVar(-2000, 2000, f'r_{job}_{d}')
-                model.Add(residual_units == provided_units_expr - round(event_unit_for_day))
+                residual_units_expr = model.NewIntVar(-2000, 2000, f'r_{job}_{d}')
+                model.Add(residual_units_expr == provided_units_expr - round(event_unit_for_day))
                 
-                diff = model.NewIntVar(-2000, 2000, f'u_d_{job}_{d}')
-                model.Add(diff == residual_units - round(avg_residual_units))
+                diff_expr = model.NewIntVar(-2000, 2000, f'u_d_{job}_{d}')
+                model.Add(diff_expr == residual_units_expr - round(avg_residual_units))
                 
-                abs_diff = model.NewIntVar(0, 2000, f'a_u_d_{job}_{d}')
-                model.AddAbsEquality(abs_diff, diff)
-                penalties.append(unit_penalty_weight * abs_diff)
+                abs_diff_expr = model.NewIntVar(0, 2000, f'a_u_d_{job}_{d}')
+                model.AddAbsEquality(abs_diff_expr, diff_expr)
+                penalties.append(unit_penalty_weight * abs_diff_expr)
 
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver(); solver.parameters.max_time_in_seconds = 60.0; status = solver.Solve(model)
@@ -341,10 +341,6 @@ def solve_shift_model(params):
         summary_df = _create_summary(schedule_df, staff_info, year, month, params['event_units'], all_half_day_requests)
         message = f"求解ステータス: **{solver.StatusName(status)}** (ペナルティ合計: **{round(solver.ObjectiveValue())}**)"
         
-        # デバッグ用にペナルティ内訳を表示
-        # breakdown = _calculate_penalty_breakdown(shifts_values, params)
-        # st.write("ペナルティ内訳:", breakdown)
-
         return True, schedule_df, summary_df, message, all_half_day_requests
     else:
         message = f"致命的なエラー: ハード制約が矛盾しているため、勤務表を作成できませんでした。({solver.StatusName(status)})"
@@ -386,6 +382,8 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
     
     for i, tab_name in enumerate(['all', 'pt', 'ot', 'st']):
         with event_tabs[i]:
+            # ★★ 修正点: day_counterをタブごとにリセット ★★
+            day_counter = 1
             num_days_in_month = calendar.monthrange(year, month)[1]
             first_day_weekday = calendar.weekday(year, month, 1)
             
@@ -393,7 +391,6 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
             weekdays_jp = ['月', '火', '水', '木', '金', '土', '日']
             for day_idx, day_name in enumerate(weekdays_jp): cal_cols[day_idx].markdown(f"<p style='text-align: center;'><b>{day_name}</b></p>", unsafe_allow_html=True)
             
-            day_counter = 1
             for week_num in range(6):
                 cols = st.columns(7)
                 for day_of_week in range(7):
@@ -449,7 +446,7 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
         params_ui['s6_penalty'] = c_s6_1.number_input("S6 標準P", value=2, disabled=not params_ui['s6_on'], key='s6p')
         params_ui['s6_penalty_heavy'] = c_s6_2.number_input("S6 強化P", value=4, disabled=not params_ui['s6_on'], key='s6ph')
     with s_cols2[2]:
-        st.markdown("") # S7があった場所のスペーサー
+        st.markdown("") 
     with s_cols2[3]:
         params_ui['high_flat_penalty'] = st.toggle('平準化ペナルティ強化', value=False, key='high_flat', help="S6のペナルティを「標準P」ではなく「強化P」で計算します。")
         
