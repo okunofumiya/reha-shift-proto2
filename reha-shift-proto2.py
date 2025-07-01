@@ -8,7 +8,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.2.4" # AM有・PM有の出勤数0.5対応、レイアウト改善
+APP_VERSION = "proto.2.5" # レイアウト最適化（設定項目をファイルエリアに配置）
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- ヘルパー関数: サマリー作成 ---
@@ -511,6 +511,18 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
         st.markdown("---")
         staff_file = st.file_uploader("1. 職員一覧 (CSV)", type="csv")
         requests_file = st.file_uploader("2. 希望休一覧 (CSV)", type="csv")
+        
+        st.markdown("---")
+        tolerance = st.number_input(
+            "PT/OT許容誤差(±)", 
+            min_value=0, max_value=5, value=1, 
+            help="PT/OTの合計人数が目標通りなら、それぞれの人数がこの値までずれてもペナルティを課しません。"
+        )
+        tri_penalty_weight = st.slider(
+            "準希望休(△)の優先度", 
+            min_value=0, max_value=20, value=8, 
+            help="値が大きいほど△希望が尊重されます。"
+        )
     
     with c2:
         st.subheader("日曜日の出勤人数設定")
@@ -531,21 +543,6 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
     
     st.markdown("---")
     st.subheader(f"{year}年{month}月のイベント設定（各日の特別業務単位数を入力）")
-    
-    # 設定項目をカレンダーエリア内に配置
-    settings_cols = st.columns(2)
-    with settings_cols[0]:
-        tolerance = st.number_input(
-            "PT/OT許容誤差(±)", 
-            min_value=0, max_value=5, value=1, 
-            help="PT/OTの合計人数が目標通りなら、それぞれの人数がこの値までずれてもペナルティを課しません。"
-        )
-    with settings_cols[1]:
-        tri_penalty_weight = st.slider(
-            "準希望休(△)の優先度", 
-            min_value=0, max_value=20, value=8, 
-            help="値が大きいほど△希望が尊重されます。"
-        )
     
     event_units_input = {}
     num_days_in_month = calendar.monthrange(year, month)[1]
