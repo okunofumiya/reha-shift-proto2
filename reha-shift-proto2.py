@@ -8,7 +8,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.2.2.2" # 重大バグ修正版
+APP_VERSION = "proto.2.2.3" # ファイルチェック機能強化版
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- ヘルパー関数: サマリー作成 ---
@@ -234,7 +234,6 @@ def solve_shift_model(params):
                     constant_unit = int(unit * 0.5) if is_half else unit
 
                     term = model.NewIntVar(0, constant_unit, f'p_u_s{s}_d{d}')
-                    # term は、出勤(shifts=1)ならconstant_unit、休み(shifts=0)なら0になる
                     model.Add(term == shifts[(s,d)] * constant_unit)
                     provided_units_expr_list.append(term)
                 
@@ -387,10 +386,22 @@ if create_button:
         try:
             params = {}
             params.update(params_ui)
-            params['staff_df'] = pd.read_csv(staff_file); params['requests_df'] = pd.read_csv(requests_file)
+            params['staff_df'] = pd.read_csv(staff_file, dtype={'職員番号': str})
+            params['requests_df'] = pd.read_csv(requests_file, dtype={'職員番号': str})
             params['year'] = year; params['month'] = month
             params['target_pt'] = target_pt; params['target_ot'] = target_ot; params['target_st'] = target_st
             params['tolerance'] = tolerance; params['event_units'] = event_units_input
+            
+            # ★★★ 改善点: 必須列の存在チェック ★★★
+            required_staff_cols = ['職員番号', '職種', '1日の単位数']
+            missing_cols = [col for col in required_staff_cols if col not in params['staff_df'].columns]
+            if missing_cols:
+                st.error(f"エラー: 職員一覧CSVの必須列が不足しています。以下の列を追加してください: **{', '.join(missing_cols)}**")
+                st.stop()
+
+            if '職員番号' not in params['requests_df'].columns:
+                 st.error(f"エラー: 希望休一覧CSVに必須列 **'職員番号'** がありません。")
+                 st.stop()
             
             if '職員名' not in params['staff_df'].columns:
                 params['staff_df']['職員名'] = params['staff_df']['職種'] + " " + params['staff_df']['職員番号'].astype(str)
