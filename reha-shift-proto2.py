@@ -8,7 +8,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.2.5" # レイアウト最適化（設定項目をファイルエリアに配置）
+APP_VERSION = "proto.2.6" # 設定項目を日曜出勤エリアに正しく配置
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- ヘルパー関数: サマリー作成 ---
@@ -511,6 +511,16 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
         st.markdown("---")
         staff_file = st.file_uploader("1. 職員一覧 (CSV)", type="csv")
         requests_file = st.file_uploader("2. 希望休一覧 (CSV)", type="csv")
+    
+    with c2:
+        st.subheader("日曜日の出勤人数設定")
+        c2_1, c2_2, c2_3 = st.columns(3)
+        with c2_1:
+            target_pt = st.number_input("PT目標", min_value=0, value=10, step=1)
+        with c2_2:
+            target_ot = st.number_input("OT目標", min_value=0, value=5, step=1)
+        with c2_3:
+            target_st = st.number_input("ST目標", min_value=0, value=3, step=1)
         
         st.markdown("---")
         tolerance = st.number_input(
@@ -523,16 +533,6 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
             min_value=0, max_value=20, value=8, 
             help="値が大きいほど△希望が尊重されます。"
         )
-    
-    with c2:
-        st.subheader("日曜日の出勤人数設定")
-        c2_1, c2_2, c2_3 = st.columns(3)
-        with c2_1:
-            target_pt = st.number_input("PT目標", min_value=0, value=10, step=1)
-        with c2_2:
-            target_ot = st.number_input("OT目標", min_value=0, value=5, step=1)
-        with c2_3:
-            target_st = st.number_input("ST目標", min_value=0, value=3, step=1)
     
     with c3:
         st.subheader("希望休の種類")
