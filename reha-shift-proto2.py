@@ -8,7 +8,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.2.3" # AM休・PM休の単位数1/2計算対応
+APP_VERSION = "proto.2.4" # AM有・PM有の出勤数0.5対応、レイアウト改善
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- ヘルパー関数: サマリー作成 ---
@@ -20,13 +20,13 @@ def _create_summary(schedule_df, staff_info_dict, year, month, event_units):
     for d in days:
         day_info = {}
         
-        # 出勤者の計算（○、出、空欄は出勤、AM休・PM休は0.5人扱い）
+        # 出勤者の計算（○、出、空欄は出勤、AM有・PM有・AM休・PM休は0.5人扱い）
         work_staff_ids = schedule_df[(schedule_df[d] == '') | (schedule_df[d] == '○') | (schedule_df[d] == '出')]['職員番号']
         half_day_staff_ids = [s for s, dates in st.session_state.get('requests_half', {}).items() if d in dates]
         am_off_staff_ids = [s for s, dates in st.session_state.get('requests_am_off', {}).items() if d in dates]
         pm_off_staff_ids = [s for s, dates in st.session_state.get('requests_pm_off', {}).items() if d in dates]
         
-        # 出勤者数の計算
+        # 出勤者数の計算（AM有・PM有・AM休・PM休は全て0.5人扱い）
         total_workers = 0
         for sid in work_staff_ids:
             if sid in half_day_staff_ids or sid in am_off_staff_ids or sid in pm_off_staff_ids:
@@ -38,7 +38,7 @@ def _create_summary(schedule_df, staff_info_dict, year, month, event_units):
         day_info['曜日'] = ['月','火','水','木','金','土','日'][calendar.weekday(year, month, d)]
         day_info['出勤者総数'] = total_workers
         
-        # 職種別出勤者数の計算
+        # 職種別出勤者数の計算（AM有・PM有・AM休・PM休は全て0.5人扱い）
         pt_workers = sum(
             0.5 if sid in (half_day_staff_ids + am_off_staff_ids + pm_off_staff_ids) else 1 
             for sid in work_staff_ids if staff_info_dict[sid]['職種'] == '理学療法士'
@@ -56,7 +56,7 @@ def _create_summary(schedule_df, staff_info_dict, year, month, event_units):
         day_info['OT'] = ot_workers
         day_info['ST'] = st_workers
         
-        # 役職者・役割別の計算
+        # 役職者・役割別の計算（AM有・PM有・AM休・PM休は全て0.5人扱い）
         day_info['役職者'] = sum(
             0.5 if sid in (half_day_staff_ids + am_off_staff_ids + pm_off_staff_ids) else 1 
             for sid in work_staff_ids if pd.notna(staff_info_dict[sid].get('役職'))
@@ -511,17 +511,6 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
         st.markdown("---")
         staff_file = st.file_uploader("1. 職員一覧 (CSV)", type="csv")
         requests_file = st.file_uploader("2. 希望休一覧 (CSV)", type="csv")
-        
-        # 希望休の種類説明を追加
-        st.markdown("**希望休の種類:**")
-        st.markdown("- **×**: 完全希望休")
-        st.markdown("- **△**: 準希望休")
-        st.markdown("- **○**: 必須出勤")
-        st.markdown("- **有**: 有給休暇")
-        st.markdown("- **特**: 特別休暇")
-        st.markdown("- **夏**: 夏期休暇")
-        st.markdown("- **AM有/PM有**: 半日有給（出勤扱い、単位数1/2）")
-        st.markdown("- **AM休/PM休**: 半日休み（0.5人扱い、単位数1/2）")
     
     with c2:
         st.subheader("日曜日の出勤人数設定")
@@ -534,12 +523,7 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
             target_st = st.number_input("ST目標", min_value=0, value=3, step=1)
     
     with c3:
-        st.subheader("緩和条件と優先度")
-        tolerance = st.number_input(
-            "PT/OT許容誤差(±)", 
-            min_value=0, max_value=5, value=1, 
-            help="PT/OTの合計人数が目標通りなら、それぞれの人数がこの値までずれてもペナルティを課しません。"
-        )
+        st.subheader("準希望休(△)の優先度")
         tri_penalty_weight = st.slider(
             "準希望休(△)の優先度", 
             min_value=0, max_value=20, value=8, 
@@ -547,6 +531,25 @@ with st.expander("▼ 各種パラメータを設定する", expanded=True):
         )
     
     st.markdown("---")
+    
+    # 移動した設定項目
+    col_left, col_right = st.columns(2)
+    
+    with col_left:
+        st.subheader("緩和条件")
+        tolerance = st.number_input(
+            "PT/OT許容誤差(±)", 
+            min_value=0, max_value=5, value=1, 
+            help="PT/OTの合計人数が目標通りなら、それぞれの人数がこの値までずれてもペナルティを課しません。"
+        )
+    
+    with col_right:
+        st.subheader("希望休の種類")
+        st.markdown("**×**: 完全希望休　**△**: 準希望休　**○**: 必須出勤")
+        st.markdown("**有**: 有給休暇　**特**: 特別休暇　**夏**: 夏期休暇")
+        st.markdown("**AM有/PM有**: 半日有給（0.5人、単位数1/2）")
+        st.markdown("**AM休/PM休**: 半日休み（0.5人、単位数1/2）")
+    
     st.subheader(f"{year}年{month}月のイベント設定（各日の特別業務単位数を入力）")
     
     event_units_input = {}
