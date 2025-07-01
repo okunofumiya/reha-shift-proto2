@@ -8,16 +8,16 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # ★★★ バージョン情報 ★★★
-APP_VERSION = "proto.2.0.4" # 安定性向上版
+APP_VERSION = "proto.2.1.0" # 半休ルール改善・夏季休暇対応版
 APP_CREDIT = "Okuno with 🤖 Gemini and Claude"
 
 # --- ヘルパー関数: サマリー作成 ---
-def _create_summary(schedule_df, staff_info_dict, year, month, event_units):
+def _create_summary(schedule_df, staff_info_dict, year, month, event_units, all_half_day_requests):
     num_days = calendar.monthrange(year, month)[1]; days = list(range(1, num_days + 1)); daily_summary = []
     for d in days:
         day_info = {}; 
-        work_staff_ids = schedule_df[(schedule_df[d] == '') | (schedule_df[d] == '○') | (schedule_df[d] == '出')]['職員番号']
-        half_day_staff_ids = [s for s, dates in st.session_state.get('requests_half', {}).items() if d in dates]
+        work_staff_ids = schedule_df[(schedule_df[d] == '') | (schedule_df[d] == '○') | (schedule_df[d] == '出') | (schedule_df[d] == '半休') | (schedule_df[d] == '半有')]['職員番号']
+        half_day_staff_ids = [s for s, dates in all_half_day_requests.items() if d in dates]
         total_workers = sum(0.5 if sid in half_day_staff_ids else 1 for sid in work_staff_ids)
         day_info['日'] = d; day_info['曜日'] = ['月','火','水','木','金','土','日'][calendar.weekday(year, month, d)]
         day_info['出勤者総数'] = total_workers
@@ -40,19 +40,22 @@ def _create_summary(schedule_df, staff_info_dict, year, month, event_units):
         daily_summary.append(day_info)
     return pd.DataFrame(daily_summary)
 
-def _create_schedule_df(shifts_values, staff, days, staff_df, requests_x, requests_tri, requests_paid, requests_special, requests_must_work):
+def _create_schedule_df(shifts_values, staff, days, staff_df, requests_x, requests_tri, requests_paid, requests_special, requests_summer, requests_half_kokyu, requests_half_paid, requests_must_work):
     schedule_data = {}
     for s in staff:
-        row = []; s_requests_x = requests_x.get(s, []); s_requests_tri = requests_tri.get(s, []); s_requests_paid = requests_paid.get(s, []); s_requests_special = requests_special.get(s, []); s_requests_must = requests_must_work.get(s, [])
+        row = []; s_requests_x = requests_x.get(s, []); s_requests_tri = requests_tri.get(s, []); s_requests_paid = requests_paid.get(s, []); s_requests_special = requests_special.get(s, []); s_requests_summer = requests_summer.get(s, []); s_requests_half_kokyu = requests_half_kokyu.get(s, []); s_requests_half_paid = requests_half_paid.get(s, []); s_requests_must = requests_must_work.get(s, [])
         for d in days:
             if shifts_values.get((s, d), 0) == 0:
                 if d in s_requests_x: row.append('×')
                 elif d in s_requests_tri: row.append('△')
                 elif d in s_requests_paid: row.append('有')
                 elif d in s_requests_special: row.append('特')
+                elif d in s_requests_summer: row.append('夏')
                 else: row.append('-')
             else:
                 if d in s_requests_must: row.append('○')
+                elif d in s_requests_half_kokyu: row.append('半休')
+                elif d in s_requests_half_paid: row.append('半有')
                 elif d in s_requests_tri: row.append('出')
                 else: row.append('')
         schedule_data[s] = row
@@ -67,13 +70,19 @@ def _calculate_penalty_breakdown(shifts_values, params):
     breakdown = {}
     full_week_violations = 0; partial_week_violations = 0
     if params.get('s0_on', False) or params.get('s2_on', False):
+        all_half_day_requests = {}
+        staff = params.get('staff', [])
+        for s in staff:
+             all_half_day_requests[s] = params.get('requests_half_paid', {}).get(s, []) + params.get('requests_half_kokyu', {}).get(s, [])
         for s in params.get('staff', []):
-            all_requests = params.get('requests_x', {}).get(s, []) + params.get('requests_tri', {}).get(s, []) + params.get('requests_paid', {}).get(s, []) + params.get('requests_special', {}).get(s, [])
+            all_requests = params.get('requests_x', {}).get(s, []) + params.get('requests_tri', {}).get(s, []) + params.get('requests_paid', {}).get(s, []) + params.get('requests_special', {}).get(s, []) + params.get('requests_summer', {}).get(s, [])
             for week in params.get('weeks_in_month', []):
                 if sum(1 for d in week if d in all_requests) >= 3: continue
-                num_holidays_in_week = sum(1 for d in week if shifts_values.get((s, d), 1) == 0)
-                if len(week) == 7 and num_holidays_in_week < 2 and params.get('s0_on'): full_week_violations += 1
-                elif len(week) < 7 and num_holidays_in_week < 1 and params.get('s2_on'): partial_week_violations += 1
+                num_full_holidays_in_week = sum(1 for d in week if shifts_values.get((s, d), 1) == 0)
+                num_half_holidays_in_week = sum(1 for d in week if d in all_half_day_requests.get(s, []))
+                total_holiday_value = 2 * num_full_holidays_in_week + num_half_holidays_in_week
+                if len(week) == 7 and total_holiday_value < 3 and params.get('s0_on'): full_week_violations += 1
+                elif len(week) < 7 and total_holiday_value < 1 and params.get('s2_on'): partial_week_violations += 1
     breakdown['S0: 完全な週'] = full_week_violations * params.get('s0_penalty', 200)
     breakdown['S2: 不完全な週'] = partial_week_violations * params.get('s2_penalty', 25)
     sun_penalty = 0
@@ -99,8 +108,12 @@ def _calculate_penalty_breakdown(shifts_values, params):
     unit_penalty = 0; staff_penalty = 0;
     if params.get('s6_on'):
         avg_residual_units = params.get('avg_residual_units', 0)
+        all_half_day_requests = {}
+        staff = params.get('staff', [])
+        for s in staff:
+            all_half_day_requests[s] = params.get('requests_half_paid', {}).get(s, []) + params.get('requests_half_kokyu', {}).get(s, [])
         for d in params.get('weekdays',[]):
-            provided_units = sum(shifts_values.get((s, d),0) * int(params.get('staff_info',{}).get(s,{}).get('1日の単位数',0)) * (0.5 if s in params.get('requests_half',{}).get(s, []) and d in params.get('requests_half',{})[s] else 1.0) for s in params.get('staff',[]))
+            provided_units = sum(shifts_values.get((s, d),0) * int(params.get('staff_info',{}).get(s,{}).get('1日の単位数',0)) * (0.5 if s in all_half_day_requests and d in all_half_day_requests[s] else 1.0) for s in params.get('staff',[]))
             event_unit = params.get('event_units',{}).get(d, 0)
             unit_penalty += abs((provided_units - event_unit) - round(avg_residual_units))
     breakdown['S6: 業務負荷平準化'] = round(unit_penalty * unit_penalty_weight)
@@ -124,31 +137,38 @@ def solve_shift_model(params):
     kaifukuki_staff = [s for s in staff if staff_info[s].get('役割1') == '回復期専従']; kaifukuki_pt = [s for s in kaifukuki_staff if staff_info[s]['職種'] == '理学療法士']
     kaifukuki_ot = [s for s in kaifukuki_staff if staff_info[s]['職種'] == '作業療法士']; gairai_staff = [s for s in staff if staff_info[s].get('役割1') == '外来PT']
     chiiki_staff = [s for s in staff if staff_info[s].get('役割1') == '地域包括専従']; sunday_off_staff = gairai_staff + chiiki_staff
-    requests_x = {}; requests_tri = {}; requests_must_work = {};
-    requests_paid = {}; requests_special = {}; st.session_state.requests_half = {};
+    requests_x = {}; requests_tri = {}; requests_must_work = {}; requests_paid = {}; requests_special = {}; requests_summer = {}; requests_half_paid = {}; requests_half_kokyu = {}
     for index, row in params['requests_df'].iterrows():
         staff_id = row['職員番号']
         if staff_id not in staff: continue
         requests_x[staff_id] = [d for d in days if str(d) in row and row.get(str(d)) == '×']; requests_tri[staff_id] = [d for d in days if str(d) in row and row.get(str(d)) == '△']
         requests_must_work[staff_id] = [d for d in days if str(d) in row and row.get(str(d)) == '○']; requests_paid[staff_id] = [d for d in days if str(d) in row and row.get(str(d)) == '有']
-        requests_special[staff_id] = [d for d in days if str(d) in row and row.get(str(d)) == '特']; st.session_state.requests_half[staff_id] = [d for d in days if str(d) in row and row.get(str(d)) in ['AM有', 'PM有']]
+        requests_special[staff_id] = [d for d in days if str(d) in row and row.get(str(d)) == '特']; requests_summer[staff_id] = [d for d in days if str(d) in row and row.get(str(d)) == '夏']
+        requests_half_paid[staff_id] = [d for d in days if str(d) in row and row.get(str(d)) in ['AM有', 'PM有']]; requests_half_kokyu[staff_id] = [d for d in days if str(d) in row and row.get(str(d)) in ['AM休', 'PM休']]
+    params['requests_half_paid'] = requests_half_paid; params['requests_half_kokyu'] = requests_half_kokyu; params['requests_summer'] = requests_summer; params['requests_x'] = requests_x; params['requests_tri'] = requests_tri; params['requests_paid'] = requests_paid; params['requests_special'] = requests_special
     model = cp_model.CpModel(); shifts = {}
     for s in staff:
         for d in days: shifts[(s, d)] = model.NewBoolVar(f'shift_{s}_{d}')
     if params['h1_on']:
         for s in staff:
-            num_paid_leave = len(requests_paid.get(s, [])); num_special_leave = len(requests_special.get(s, []))
-            model.Add(sum(1 - shifts[(s, d)] for d in days) == 9 + num_paid_leave + num_special_leave)
+            num_paid_leave = len(requests_paid.get(s, [])); num_special_leave = len(requests_special.get(s, [])); num_summer_leave = len(requests_summer.get(s, [])); num_half_kokyu = len(requests_half_kokyu.get(s, []))
+            full_holidays_kokyu = model.NewIntVar(0, num_days, f'full_kokyu_{s}')
+            model.Add(full_holidays_kokyu == sum(1 - shifts[(s, d)] for d in days) - num_paid_leave - num_special_leave - num_summer_leave)
+            model.Add(2 * full_holidays_kokyu + num_half_kokyu == 18)
     if params['h2_on']:
         for s, dates in requests_must_work.items():
             for d in dates: model.Add(shifts[(s, d)] == 1)
-        for s, dates in st.session_state.requests_half.items():
+        for s, dates in requests_half_paid.items():
+            for d in dates: model.Add(shifts[(s, d)] == 1)
+        for s, dates in requests_half_kokyu.items():
             for d in dates: model.Add(shifts[(s, d)] == 1)
         for s, dates in requests_x.items():
             for d in dates: model.Add(shifts[(s, d)] == 0)
         for s, dates in requests_paid.items():
             for d in dates: model.Add(shifts[(s, d)] == 0)
         for s, dates in requests_special.items():
+            for d in dates: model.Add(shifts[(s, d)] == 0)
+        for s, dates in requests_summer.items():
             for d in dates: model.Add(shifts[(s, d)] == 0)
     if params['h3_on']:
         for d in days: model.Add(sum(shifts[(s, d)] for s in managers) >= 1)
@@ -167,15 +187,18 @@ def solve_shift_model(params):
         for d in days:
             current_week.append(d)
             if calendar.weekday(year, month, d) == 5 or d == num_days: weeks_in_month.append(current_week); current_week = []
+        all_half_day_requests = {s: requests_half_paid.get(s, []) + requests_half_kokyu.get(s, []) for s in staff}
         for s_idx, s in enumerate(staff):
-            all_requests = requests_x.get(s, []) + requests_tri.get(s, []) + requests_paid.get(s, []) + requests_special.get(s, [])
+            all_requests = requests_x.get(s, []) + requests_tri.get(s, []) + requests_paid.get(s, []) + requests_special.get(s, []) + requests_summer.get(s, [])
             for w_idx, week in enumerate(weeks_in_month):
                 if sum(1 for d in week if d in all_requests) >= 3: continue
-                num_holidays_in_week = sum(1 - shifts[(s, d)] for d in week)
+                num_full_holidays_in_week = sum(1 - shifts[(s, d)] for d in week)
+                num_half_holidays_in_week = sum(1 for d in week if d in all_half_day_requests.get(s, []))
+                total_holiday_value = model.NewIntVar(0, 28, f'thv_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value == 2 * num_full_holidays_in_week + num_half_holidays_in_week)
                 if len(week) == 7 and params['s0_on']:
-                    violation = model.NewBoolVar(f'f_w_v_s{s_idx}_w{w_idx}'); model.Add(num_holidays_in_week < 2).OnlyEnforceIf(violation); model.Add(num_holidays_in_week >= 2).OnlyEnforceIf(violation.Not()); penalties.append(params['s0_penalty'] * violation)
+                    violation = model.NewBoolVar(f'f_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 3).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 3).OnlyEnforceIf(violation.Not()); penalties.append(params['s0_penalty'] * violation)
                 elif len(week) < 7 and params['s2_on']:
-                    violation = model.NewBoolVar(f'p_w_v_s{s_idx}_w{w_idx}'); model.Add(num_holidays_in_week < 1).OnlyEnforceIf(violation); model.Add(num_holidays_in_week >= 1).OnlyEnforceIf(violation.Not()); penalties.append(params['s2_penalty'] * violation)
+                    violation = model.NewBoolVar(f'p_w_v_s{s_idx}_w{w_idx}'); model.Add(total_holiday_value < 1).OnlyEnforceIf(violation); model.Add(total_holiday_value >= 1).OnlyEnforceIf(violation.Not()); penalties.append(params['s2_penalty'] * violation)
     if any([params['s1a_on'], params['s1b_on'], params['s1c_on']]):
         for d in sundays:
             pt_on_sunday = sum(shifts[(s, d)] for s in pt_staff); ot_on_sunday = sum(shifts[(s, d)] for s in ot_staff); st_on_sunday = sum(shifts[(s, d)] for s in st_staff)
@@ -207,22 +230,24 @@ def solve_shift_model(params):
     if params['s6_on']:
         total_weekday_units = sum(int(staff_info[s]['1日の単位数']) * (len(weekdays) / (len(weekdays)+len(sundays))) * (len(days) - 9 - len(requests_paid.get(s,[])) - len(requests_special.get(s,[]))) for s in staff)
         total_event_units = sum(params['event_units'].values()); avg_residual_units = (total_weekday_units - total_event_units) / len(weekdays) if weekdays else 0
+        all_half_day_requests = {s: requests_half_paid.get(s, []) + requests_half_kokyu.get(s, []) for s in staff}
         for d in weekdays:
-            provided_units = sum(shifts[(s, d)] * int(staff_info[s]['1日の単位数']) * (0.5 if s in st.session_state.requests_half.get(s, []) and d in st.session_state.requests_half[s] else 1.0) for s in staff); event_unit = params['event_units'].get(d, 0); residual_units = model.NewIntVar(-2000, 2000, f'r_{d}'); model.Add(residual_units == provided_units - event_unit); diff = model.NewIntVar(-2000, 2000, f'u_d_{d}'); model.Add(diff == residual_units - round(avg_residual_units)); abs_diff = model.NewIntVar(0, 2000, f'a_u_d_{d}'); model.AddAbsEquality(abs_diff, diff); penalties.append(unit_penalty_weight * abs_diff)
+            provided_units = sum(shifts[(s, d)] * int(staff_info[s]['1日の単位数']) * (0.5 if s in all_half_day_requests and d in all_half_day_requests[s] else 1.0) for s in staff); event_unit = params['event_units'].get(d, 0); residual_units = model.NewIntVar(-2000, 2000, f'r_{d}'); model.Add(residual_units == provided_units - event_unit); diff = model.NewIntVar(-2000, 2000, f'u_d_{d}'); model.Add(diff == residual_units - round(avg_residual_units)); abs_diff = model.NewIntVar(0, 2000, f'a_u_d_{d}'); model.AddAbsEquality(abs_diff, diff); penalties.append(unit_penalty_weight * abs_diff)
     
     model.Minimize(sum(penalties))
     solver = cp_model.CpSolver(); solver.parameters.max_time_in_seconds = 60.0; status = solver.Solve(model)
     
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
         shifts_values = {(s, d): solver.Value(shifts[(s, d)]) for s in staff for d in days}
-        schedule_df = _create_schedule_df(shifts_values, staff, days, params['staff_df'], requests_x, requests_tri, requests_paid, requests_special, requests_must_work)
-        temp_work_df = schedule_df.replace({'×': '休', '-': '休', '△': '休', '有': '休', '特': '休', '': '出', '○': '出'})
-        summary_df = _create_summary(temp_work_df, staff_info, year, month, params['event_units'])
+        all_half_day_requests = {s: requests_half_paid.get(s, []) + requests_half_kokyu.get(s, []) for s in staff}
+        schedule_df = _create_schedule_df(shifts_values, staff, days, params['staff_df'], requests_x, requests_tri, requests_paid, requests_special, requests_summer, requests_half_kokyu, requests_half_paid, requests_must_work)
+        temp_work_df = schedule_df.replace({'×': '休', '-': '休', '△': '休', '有': '休', '特': '休', '夏': '休', '': '出', '○': '出', '半休': '出', '半有': '出'})
+        summary_df = _create_summary(temp_work_df, staff_info, year, month, params['event_units'], all_half_day_requests)
         message = f"求解ステータス: **{solver.StatusName(status)}** (ペナルティ合計: **{round(solver.ObjectiveValue())}**)"
-        return True, schedule_df, summary_df, message, requests_must_work
+        return True, schedule_df, summary_df, message, requests_must_work, all_half_day_requests
     else:
         message = f"致命的なエラー: ハード制約が矛盾しているため、勤務表を作成できませんでした。({solver.StatusName(status)})"
-        return False, pd.DataFrame(), pd.DataFrame(), message, None
+        return False, pd.DataFrame(), pd.DataFrame(), message, None, None
 
 # --- Streamlit UI ---
 st.set_page_config(layout="wide")
@@ -285,12 +310,13 @@ with st.expander("▼ ルール検証モード（上級者向け）"):
     with h_cols[4]: params['h5_on'] = st.toggle('H5: 日曜出勤上限', value=True, key='h5')
     st.markdown("---")
     st.subheader("ソフト制約のON/OFFとペナルティ設定")
+    st.info("S0/S2の週休ルールは、半日休（AM休など）を0.5日としてカウントし、完全な週は1.5日、不完全な週は0.5日の休日確保を目指します。")
     s_cols = st.columns(4)
     with s_cols[0]:
-        params['s0_on'] = st.toggle('S0: 完全週の週休2日', value=True, key='s0')
+        params['s0_on'] = st.toggle('S0: 完全週の週休1.5日', value=True, key='s0')
         params['s0_penalty'] = st.number_input("S0 Penalty", value=200, disabled=not params['s0_on'], key='s0p')
     with s_cols[1]:
-        params['s2_on'] = st.toggle('S2: 不完全週の週休1日', value=True, key='s2')
+        params['s2_on'] = st.toggle('S2: 不完全週の週休0.5日', value=True, key='s2')
         params['s2_penalty'] = st.number_input("S2 Penalty", value=25, disabled=not params['s2_on'], key='s2p')
     with s_cols[2]:
         params['s3_on'] = st.toggle('S3: 外来同時休', value=True, key='s3')
@@ -331,21 +357,20 @@ if create_button:
             params['year'] = year; params['month'] = month
             params['target_pt'] = target_pt; params['target_ot'] = target_ot; params['target_st'] = target_st
             params['tolerance'] = tolerance; params['event_units'] = event_units_input
-            params['tri_penalty_weight'] = tri_penalty_weight
+            params['s4_penalty'] = tri_penalty_weight # Sliderの値を反映
             
             if '職員名' not in params['staff_df'].columns:
                 params['staff_df']['職員名'] = params['staff_df']['職種'] + " " + params['staff_df']['職員番号'].astype(str)
                 st.info("職員一覧に「職員名」列がなかったため、仮の職員名を生成しました。")
             
-            is_feasible, schedule_df, summary_df, message, req_must_work = solve_shift_model(params)
+            is_feasible, schedule_df, summary_df, message, req_must_work, all_half_day_requests = solve_shift_model(params)
             
             st.info(message)
             if is_feasible:
                 st.header("勤務表")
-                # (表示部分は変更なし)
                 num_days = calendar.monthrange(year, month)[1]
-                temp_work_df = schedule_df.replace({'×': '休', '-': '休', '△': '休', '有': '休', '特': '休', '': '出', '○': '出'})
-                summary_T = _create_summary(temp_work_df, params['staff_df'].set_index('職員番号').to_dict('index'), year, month, event_units_input).drop(columns=['日', '曜日']).T
+                temp_work_df = schedule_df.replace({'×': '休', '-': '休', '△': '休', '有': '休', '特': '休', '夏':'休', '': '出', '○': '出', '半休':'出', '半有':'出'})
+                summary_T = _create_summary(temp_work_df, params['staff_df'].set_index('職員番号').to_dict('index'), year, month, event_units_input, all_half_day_requests).drop(columns=['日', '曜日']).T
                 summary_T.columns = list(range(1, num_days + 1))
                 summary_processed = summary_T.reset_index().rename(columns={'index': '職員名'})
                 summary_processed['職員番号'] = summary_processed['職員名'].apply(lambda x: f"_{x}")
